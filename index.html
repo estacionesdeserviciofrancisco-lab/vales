@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestor de Vales - Estación de Servicio</title>
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.0/dist/JsBarcode.all.min.js"></script>
+    <style>
+        :root { --primary: #2563eb; --success: #16a34a; --danger: #dc2626; --dark: #1e293b; --bg: #f8fafc; --gray: #94a3b8; }
+        body { font-family: 'Inter', sans-serif; background: var(--bg); margin: 0; padding: 20px; color: var(--dark); }
+        .container { max-width: 600px; margin: auto; }
+        
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); margin-bottom: 20px; position: relative; }
+        h2 { margin-top: 0; font-size: 1.2rem; border-bottom: 2px solid #f1f5f9; padding-bottom: 10px; margin-bottom: 15px; }
+
+        /* Estilos Admin */
+        .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
+        .input-group { display: flex; flex-direction: column; gap: 4px; }
+        label { font-size: 0.75rem; font-weight: bold; color: #64748b; text-transform: uppercase; }
+        input, select { padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; }
+        
+        .btn { cursor: pointer; border: none; border-radius: 6px; padding: 10px; font-weight: 600; transition: 0.2s; color: white; }
+        .btn-add { background: var(--dark); width: 100%; grid-column: span 2; }
+        .btn-generate { background: var(--primary); width: 100%; margin-top: 10px; font-size: 1rem; }
+        
+        /* Lista de Vales */
+        .vale-item { 
+            background: white; border: 1px solid #e2e8f0; padding: 15px; border-radius: 10px; 
+            margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;
+            transition: 0.3s;
+        }
+        .vale-item.locked { background: #f1f5f9; opacity: 0.6; border-style: dashed; }
+        .vale-info b { font-size: 1.3rem; color: var(--primary); }
+        .vale-info span { display: block; font-size: 0.85rem; color: #64748b; }
+
+        .btn-send-wa { background: #25d366; font-size: 0.8rem; display: flex; align-items: center; gap: 5px; }
+        .btn-send-wa:disabled { background: var(--gray); cursor: not-allowed; }
+
+        /* Modal Escaneo */
+        #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); justify-content: center; align-items: center; padding: 20px; z-index: 100; }
+        .modal-content { background: white; padding: 25px; border-radius: 15px; text-align: center; width: 100%; }
+        #barcode { width: 100%; max-height: 150px; margin: 15px 0; }
+        
+        .hidden { display: none; }
+        .badge-locked { background: #fee2e2; color: #991b1b; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-top: 5px; display: inline-block; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div id="admin-panel">
+        <div class="card">
+            <h2>⚙️ Generador de Paquete de Vales</h2>
+            <div class="input-group" style="margin-bottom: 15px;">
+                <label>Nombre de la Estación</label>
+                <input type="text" id="st-name" placeholder="Ej: Estación de Servicio Sol">
+            </div>
+            
+            <div class="form-grid">
+                <div class="input-group">
+                    <label>Código</label>
+                    <input type="text" id="v-code" placeholder="87654321">
+                </div>
+                <div class="input-group">
+                    <label>Importe (€)</label>
+                    <input type="number" id="v-amount" placeholder="20.00">
+                </div>
+                <button class="btn btn-add" onclick="addToQueue()">+ AÑADIR A LA LISTA</button>
+            </div>
+
+            <div id="queue-section" class="hidden">
+                <h2 style="font-size: 0.9rem; color: var(--gray);">PREVISUALIZACIÓN DEL ENVÍO:</h2>
+                <div id="queue-list"></div>
+                <button class="btn btn-generate" onclick="generateFinalLink()">COPIAR MENSAJE PARA EL CLIENTE</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="client-panel" class="hidden">
+        <div class="card">
+            <h2 id="client-station-title">Cargando vales...</h2>
+            <p style="font-size: 0.85rem; color: #64748b; margin-bottom: 15px;">
+                Selecciona un vale para enviárselo a un socio. Una vez enviado, el vale quedará bloqueado para evitar duplicados.
+            </p>
+            <div id="client-vales-list"></div>
+        </div>
+    </div>
+</div>
+
+<div id="modal" onclick="closeModal()">
+    <div class="modal-content" onclick="event.stopPropagation()">
+        <h2 id="modal-amount"></h2>
+        <svg id="barcode"></svg>
+        <p id="modal-code-text" style="font-weight: bold;"></p>
+        <button class="btn" onclick="closeModal()" style="background:var(--dark); width:100%">CERRAR</button>
+    </div>
+</div>
+
+<script>
+    let queue = [];
+    const params = new URLSearchParams(window.location.search);
+    const dataEncoded = params.get('d');
+
+    window.onload = () => {
+        if (dataEncoded) {
+            document.getElementById('admin-panel').classList.add('hidden');
+            document.getElementById('client-panel').classList.remove('hidden');
+            renderClientView();
+        }
+    };
+
+    // --- LÓGICA ADMINISTRADOR ---
+    function addToQueue() {
+        const code = document.getElementById('v-code').value;
+        const amount = document.getElementById('v-amount').value;
+        if(!code || !amount) return alert("Faltan datos");
+
+        queue.push({ id: code, am: amount });
+        document.getElementById('queue-section').classList.remove('hidden');
+        
+        const qList = document.getElementById('queue-list');
+        qList.innerHTML = queue.map(v => `<div style="font-size:0.8rem; padding:5px; border-bottom:1px solid #eee;">• Vale ${v.am}€ (Cód: ${v.id})</div>`).join('');
+        
+        document.getElementById('v-code').value = '';
+        document.getElementById('v-amount').value = '';
+    }
+
+    function generateFinalLink() {
+        const station = document.getElementById('st-name').value || "Estación de Servicio";
+        const data = { s: station, v: queue };
+        const str = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+        const url = window.location.origin + window.location.pathname + '?d=' + str;
+        
+        const msg = `⛽ *PAQUETE DE VALES DISPONIBLES*\nEstación: *${station}*\n\nPulsa el enlace para gestionar y enviar los vales a tus socios:\n${url}`;
+        
+        navigator.clipboard.writeText(msg);
+        alert("¡Mensaje listo! Pégalo en el WhatsApp del cliente.");
+    }
+
+    // --- LÓGICA CLIENTE (DISTRIBUIDOR) ---
+    function renderClientView() {
+        try {
+            const decoded = JSON.parse(decodeURIComponent(escape(atob(dataEncoded))));
+            document.getElementById('client-station-title').innerText = "📍 " + decoded.s;
+            
+            // Cargar historial de bloqueos local
+            const lockKey = 'locked_vales_' + btoa(decoded.s).substring(0,8);
+            const lockedVales = JSON.parse(localStorage.getItem(lockKey)) || [];
+            
+            const list = document.getElementById('client-vales-list');
+            list.innerHTML = '';
+
+            decoded.v.forEach((v, index) => {
+                const isLocked = lockedVales.includes(v.id);
+                const div = document.createElement('div');
+                div.className = `vale-item ${isLocked ? 'locked' : ''}`;
+                
+                div.innerHTML = `
+                    <div class="vale-info" onclick="${!isLocked ? `viewBarcode('${v.id}', '${v.am}')` : ''}">
+                        <b>${v.am} €</b>
+                        <span>Código: ${v.id}</span>
+                        ${isLocked ? '<span class="badge-locked">YA ENVIADO</span>' : ''}
+                    </div>
+                    <button class="btn btn-send-wa" ${isLocked ? 'disabled' : ''} 
+                        onclick="sendToPartner('${v.id}', '${v.am}', '${decoded.s}', '${lockKey}')">
+                        ${isLocked ? 'ENVIADO' : 'ENVIAR WA'}
+                    </button>
+                `;
+                list.appendChild(div);
+            });
+        } catch(e) { alert("Error al procesar el paquete."); }
+    }
+
+    function sendToPartner(id, am, station, lockKey) {
+        // 1. Mensaje para el socio final (con instrucciones de canje)
+        const msg = `*VALE DE COMBUSTIBLE* ⛽\n` +
+                    `--------------------------\n` +
+                    `📍 *Estación:* ${station}\n` +
+                    `💰 *Importe:* ${am}€\n` +
+                    `🔢 *Código:* ${id}\n` +
+                    `--------------------------\n` +
+                    `Presente este mensaje en caja para su canje.`;
+
+        // 2. Abrir WhatsApp
+        window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
+
+        // 3. Bloquear el vale localmente
+        let lockedVales = JSON.parse(localStorage.getItem(lockKey)) || [];
+        if(!lockedVales.includes(id)) {
+            lockedVales.push(id);
+            localStorage.setItem(lockKey, JSON.stringify(lockedVales));
+        }
+
+        // 4. Refrescar vista
+        setTimeout(renderClientView, 1000);
+    }
+
+    function viewBarcode(id, am) {
+        document.getElementById('modal').style.display = 'flex';
+        document.getElementById('modal-amount').innerText = am + " €";
+        document.getElementById('modal-code-text').innerText = id;
+        JsBarcode("#barcode", id, { format: "CODE128", width: 2, height: 80 });
+    }
+
+    function closeModal() { document.getElementById('modal').style.display = 'none'; }
+</script>
+
+</body>
+</html>
